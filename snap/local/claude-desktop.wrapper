@@ -1,0 +1,104 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Canonical Ltd.
+# SPDX-FileCopyrightText: Alex Murray
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wrapper script for Claude Desktop, shipped in the snap's optional
+# `desktop` component. Unsets SNAP environment variables and execs the
+# Electron binary from the component, so the app (and the tools it runs)
+# operate in the user's environment, not the snap's.
+#
+# Based on opencode-snap's opencode-desktop.wrapper.
+
+BIN="$SNAP/../components/$SNAP_REVISION/desktop/claude-desktop"
+
+# Prepend the snap's bundled clipboard tools (wl-copy / wl-paste) to PATH,
+# same as claude.wrapper, for the Claude Code sessions the app runs.
+PATH="$SNAP/usr/bin:$PATH"
+export PATH
+
+if [ ! -f "$BIN" ]; then
+    ICON="$SNAP/usr/share/icons/hicolor/256x256/apps/claude-desktop.png"
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --error \
+            --title="Claude" \
+            --text="The Claude Desktop component is not installed.\n\nPlease install it using:\n  snap install claude-code+desktop" \
+            --icon="${ICON}" \
+            --width=340 \
+            --height=160 || true
+    else
+        echo "Claude Desktop component is not installed." >&2
+        echo "Install it with: snap install claude-code+desktop" >&2
+    fi
+    exit 1
+fi
+
+# Say up front what the host is missing for the Cowork tab, which the app
+# itself only reports inside that tab. Notify once per distinct set of
+# problems (remembered in $SNAP_USER_COMMON) rather than on every launch;
+# always print to stderr for terminal launches. The stamp is only written
+# once the notification is accepted, so a launch with no notification
+# daemon (e.g. over SSH, or autostart before the session is ready) doesn't
+# mark the hint as shown. Backgrounded so a slow daemon can't delay launch.
+#
+# Sent with the snap's own gdbus (see the gdbus part in snapcraft.yaml)
+# straight to the org.freedesktop.Notifications service. GIO_MODULE_DIR
+# points at a directory that doesn't exist, for this one command only, so
+# core26's GIO never loads the host's GIO modules (built against the
+# host's GLib). gdbus types each argument from the service's introspection
+# data, taking strings that aren't GVariant text literally; the `--` stops
+# it reading the trailing -1 (server-default expiry) as an option.
+. "$SNAP/bin/claude-desktop-cowork-check.sh"
+HINT_STAMP="$SNAP_USER_COMMON/cowork-hint"
+if [ -n "$COWORK_HINT" ]; then
+    printf 'Claude Desktop: Cowork is unavailable on this system.\n%s\n' "$COWORK_HINT" >&2
+    if [ "$(cat "$HINT_STAMP" 2>/dev/null)" != "$COWORK_HINT" ]; then
+        (
+            GIO_MODULE_DIR="$SNAP/usr/libexec/claude-code/no-gio-modules" \
+                "$SNAP/usr/libexec/claude-code/gdbus" call --session \
+                --dest org.freedesktop.Notifications \
+                --object-path /org/freedesktop/Notifications \
+                --method org.freedesktop.Notifications.Notify -- \
+                Claude 0 \
+                "$SNAP/usr/share/icons/hicolor/256x256/apps/claude-desktop.png" \
+                "Cowork is unavailable on this system" \
+                "$COWORK_HINT
+Then restart Claude." '[]' '{}' -1 >/dev/null 2>&1 &&
+                mkdir -p "$SNAP_USER_COMMON" &&
+                printf '%s\n' "$COWORK_HINT" > "$HINT_STAMP"
+        ) &
+    fi
+else
+    rm -f "$HINT_STAMP"
+fi
+unset COWORK_HINT HINT_STAMP
+
+# Arms AppArmor's onexec transition so the app, and everything it spawns,
+# runs unconfined — same as claude.wrapper; see claude-onexec.sh for why.
+. "$SNAP/bin/claude-onexec.sh"
+
+# Chromium's renderer sandbox needs either unprivileged user namespaces or
+# its setuid chrome-sandbox helper, which a snap can't ship (the
+# claude-desktop part drops it). Where unprivileged user namespaces are
+# restricted — Ubuntu 23.10+, which the upstream .deb handles by installing
+# an AppArmor userns profile for its own /usr/lib path, and Debian's
+# unprivileged_userns_clone=0 — neither is available to the now-unconfined
+# app, so Chromium would refuse to start: fall back to --no-sandbox there,
+# as opencode-snap's desktop wrapper always does. Everywhere else, keep the
+# sandbox.
+NO_SANDBOX=
+RESTRICT_USERNS=
+{ read -r RESTRICT_USERNS < /proc/sys/kernel/apparmor_restrict_unprivileged_userns; } 2>/dev/null || :
+USERNS_CLONE=
+{ read -r USERNS_CLONE < /proc/sys/kernel/unprivileged_userns_clone; } 2>/dev/null || :
+if [ "$RESTRICT_USERNS" = 1 ] || [ "$USERNS_CLONE" = 0 ]; then
+    NO_SANDBOX=--no-sandbox
+fi
+unset RESTRICT_USERNS USERNS_CLONE
+
+# Unset all environment variables starting with SNAP
+for var in $(env | cut -d= -f1 | grep '^SNAP'); do
+    unset "$var"
+done
+
+exec "$BIN" $NO_SANDBOX "$@"

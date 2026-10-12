@@ -1,0 +1,258 @@
+# SPDX-FileCopyrightText: Canonical Ltd.
+# SPDX-FileCopyrightText: Alex Murray
+# SPDX-License-Identifier: Apache-2.0
+
+summary: Verify the desktop component installs and Claude Desktop works
+details: |
+    Checks that the claude-code+desktop component is installed where
+    claude-desktop.wrapper expects it, that snapd exported its desktop entry,
+    and that Claude Desktop actually starts under Xvfb as a regular user
+    (upstream refuses to run as root without --no-sandbox).
+
+    Once running, it checks what the wrapper is responsible for:
+
+      - the app runs unconfined (the AppArmor onexec workaround, see
+        AGENTS.md), and so do processes it spawns: a strictly-confined snap
+        (hello-world) run with its output redirected to a file, from a
+        process the app spawned, succeeds (LP: #1849753). The spawned
+        process is the login shell the app runs at startup to load the
+        user's environment ($SHELL -l -i -c "... env -0 ..."), so $SHELL is
+        pointed at a probe script — the same trick opencode-snap's
+        apparmor-onexec test uses;
+      - Chromium's sandbox is disabled only where unprivileged user
+        namespaces are restricted (Ubuntu 23.10+) and really active
+        everywhere else — renderers in their own user namespace;
+      - the Cowork prerequisite check names the missing host packages; the
+        wrapper prints them and sends a notification through the snap's
+        bundled gdbus, and only remembers the hint as shown once the
+        notification is accepted (the user's own session bus, with and
+        without a fake org.freedesktop.Notifications service on it, stands
+        in for a desktop session with and without a notification daemon);
+      - without the component installed, the wrapper exits with install
+        instructions instead.
+
+    Like the upstream package, Claude Desktop targets Debian-based systems,
+    so Fedora is excluded.
+
+systems:
+    - ubuntu-*
+    - debian-*
+
+prepare: |
+    snap install hello-world
+
+    # Xvfb plus the shared libraries Electron needs, which cloud images lack;
+    # dbus-user-session and python3-gi for the session bus and the fake
+    # notification service on it.
+    apt-get update
+    apt-get install -y xvfb xauth libgtk-3-0t64 libnss3 libgbm1 libnotify4 \
+        libsecret-1-0 libxtst6 libxcb-dri3-0 libasound2t64 xdg-utils \
+        dbus-user-session python3-gi
+
+    # A real user session bus, as in a desktop session. It has to be the
+    # user's systemd instance's bus, not a bare dbus-run-session one: with a
+    # session bus present, `snap run` asks the systemd user instance on it
+    # to track the app's processes, and refuses to run without it.
+    loginctl enable-linger "$(id -nu 1000)"
+    for _ in $(seq 30); do
+        [ -S /run/user/1000/bus ] && break
+        sleep 1
+    done
+    test -S /run/user/1000/bus
+
+    # Stand-in login shell for the app's startup environment probe. Runs as
+    # the image's regular user, so the directory must be writable by it.
+    mkdir -p /tmp/desktop-probe
+    chmod 1777 /tmp/desktop-probe
+    cat > /tmp/desktop-probe/probe-shell <<'EOF'
+    #!/bin/sh
+    tr -d '\0' < /proc/self/attr/apparmor/current > /tmp/desktop-probe/shell-label.txt
+    snap run hello-world > /tmp/desktop-probe/redirect.txt 2> /tmp/desktop-probe/redirect.err
+    echo $? > /tmp/desktop-probe/redirect.rc
+    exec /bin/sh "$@"
+    EOF
+    chmod 755 /tmp/desktop-probe/probe-shell
+
+    # Fake org.freedesktop.Notifications service: records the summary and
+    # body of each Notify call, and touches a file once it owns its name.
+    cat > /tmp/desktop-probe/fake-notifyd.py <<'EOF'
+    from gi.repository import Gio, GLib
+    XML = '''<node><interface name="org.freedesktop.Notifications">
+      <method name="Notify">
+        <arg type="s" direction="in"/><arg type="u" direction="in"/>
+        <arg type="s" direction="in"/><arg type="s" direction="in"/>
+        <arg type="s" direction="in"/><arg type="as" direction="in"/>
+        <arg type="a{sv}" direction="in"/><arg type="i" direction="in"/>
+        <arg type="u" direction="out"/>
+      </method>
+    </interface></node>'''
+    def on_call(conn, sender, path, iface, method, params, invocation):
+        app, _, _, summary, body, _, _, _ = params.unpack()
+        with open("/tmp/desktop-probe/notifications.txt", "a") as f:
+            f.write(f"{app}|{summary}|{body}\n")
+        invocation.return_value(GLib.Variant("(u)", (1,)))
+    def on_bus(conn, name):
+        conn.register_object("/org/freedesktop/Notifications",
+                             Gio.DBusNodeInfo.new_for_xml(XML).interfaces[0],
+                             on_call, None, None)
+    def on_name(conn, name):
+        open("/tmp/desktop-probe/notifyd.ready", "w").close()
+    Gio.bus_own_name(Gio.BusType.SESSION, "org.freedesktop.Notifications",
+                     Gio.BusNameOwnerFlags.NONE, on_bus, on_name, None)
+    GLib.MainLoop().run()
+    EOF
+
+execute: |
+    SNAP_REVISION=$(snap list claude-code | awk 'NR==2 {print $3}')
+    COMP="/snap/claude-code/components/$SNAP_REVISION/desktop"
+
+    # 1. The component is installed where claude-desktop.wrapper looks for
+    #    it ($SNAP/../components/$SNAP_REVISION/desktop), without the setuid
+    #    sandbox helper the claude-desktop part drops.
+    snap components claude-code | MATCH '^claude-code\+desktop +installed'
+    test -x "$COMP/claude-desktop"
+    test ! -e "$COMP/chrome-sandbox"
+    test -e "$COMP/copyright"
+
+    # 2. snapd exported the desktop entry (upstream's, rewritten at build
+    #    time), pointing at the wrapper app — including upstream's desktop
+    #    actions, which pass claude:// URLs as arguments.
+    DESKTOP_FILE=/var/lib/snapd/desktop/applications/claude-code_desktop.desktop
+    cat "$DESKTOP_FILE"
+    MATCH '^Exec=.*/snap/bin/claude-code\.desktop %U$' < "$DESKTOP_FILE"
+    MATCH '^Exec=.*/snap/bin/claude-code\.desktop "claude://claude\.ai/new\?' < "$DESKTOP_FILE"
+    MATCH '^Exec=.*/snap/bin/claude-code\.desktop "claude://code/new\?' < "$DESKTOP_FILE"
+    MATCH '^Icon=/snap/claude-code/current/usr/share/icons/hicolor/256x256/apps/claude-desktop\.png$' < "$DESKTOP_FILE"
+    MATCH '^StartupWMClass=com\.anthropic\.Claude$' < "$DESKTOP_FILE"
+    MATCH '^MimeType=x-scheme-handler/claude;' < "$DESKTOP_FILE"
+    test -e /snap/claude-code/current/usr/share/icons/hicolor/256x256/apps/claude-desktop.png
+
+    # 3. Launch the app as the image's regular user, as a transient unit so
+    #    restore can stop it however the task ends (and so its output goes
+    #    to the journal, not a file opened by this shell — see AGENTS.md).
+    #    $SHELL points at the probe script (see prepare), and it uses the
+    #    user's session bus, with no notification service on it yet.
+    USER_NAME=$(id -nu 1000)
+    BUS=unix:path=/run/user/1000/bus
+    systemd-run --unit=claude-desktop-smoke --collect --uid=1000 \
+        -E HOME="/home/$USER_NAME" -E SHELL=/tmp/desktop-probe/probe-shell \
+        -E XDG_RUNTIME_DIR=/run/user/1000 -E DBUS_SESSION_BUS_ADDRESS="$BUS" \
+        xvfb-run -a snap run claude-code.desktop
+
+    # Print the PIDs of Claude Desktop processes whose arguments match $1.
+    desktop_pids() {
+        ps -eo pid=,args= | awk -v re="$1" '$2 ~ /\/claude-desktop$/ && $0 ~ re {print $1}'
+    }
+    label() {
+        tr -d '\0' < "/proc/$1/attr/apparmor/current"
+    }
+
+    # A renderer means the app got past Chromium's sandbox setup, which
+    # aborts at startup if it can't be satisfied. Also wait for the
+    # environment probe, which the app runs shortly after startup.
+    RENDERER=
+    for _ in $(seq 90); do
+        RENDERER=$(desktop_pids ' --type=renderer( |$)' | head -n 1)
+        if [ -n "$RENDERER" ] && [ -e /tmp/desktop-probe/redirect.rc ]; then
+            break
+        fi
+        sleep 1
+    done
+    test -n "$RENDERER"
+    MAIN=$(desktop_pids . | while read -r pid; do
+        grep -qz -- '^--type=' "/proc/$pid/cmdline" || echo "$pid"
+    done | head -n 1)
+    test -n "$MAIN"
+    MAIN_ARGS=$(tr '\0' ' ' < "/proc/$MAIN/cmdline")
+    echo "main ($MAIN): $(label "$MAIN"): $MAIN_ARGS"
+    echo "renderer ($RENDERER): $(label "$RENDERER")"
+
+    # The app and its children run unconfined (onexec workaround), and a
+    # process it spawned can redirect a strictly-confined snap's output to a
+    # file (LP: #1849753).
+    echo "shell probe: $(cat /tmp/desktop-probe/shell-label.txt)"
+    echo "redirect: rc=$(cat /tmp/desktop-probe/redirect.rc)"
+    cat /tmp/desktop-probe/redirect.err
+    test "$(label "$MAIN")" = unconfined
+    test "$(label "$RENDERER")" = unconfined
+    test "$(cat /tmp/desktop-probe/shell-label.txt)" = unconfined
+    test "$(cat /tmp/desktop-probe/redirect.rc)" = 0
+    MATCH 'Hello World!' < /tmp/desktop-probe/redirect.txt
+
+    # --no-sandbox only where unprivileged user namespaces are restricted;
+    # elsewhere the sandbox is really in use.
+    RESTRICT_USERNS=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)
+    if [ "$RESTRICT_USERNS" = 1 ]; then
+        echo "$MAIN_ARGS" | MATCH -- '--no-sandbox'
+    else
+        echo "$MAIN_ARGS" | NOMATCH -- '--no-sandbox'
+        test "$(readlink "/proc/$RENDERER/ns/user")" != "$(readlink "/proc/$MAIN/ns/user")"
+    fi
+
+    # And it stays up (no crash shortly after its first window).
+    sleep 10
+    systemctl is-active claude-desktop-smoke
+    kill -0 "$MAIN"
+    systemctl stop claude-desktop-smoke
+
+    # 4. The wrapper's Cowork check (see claude-desktop-cowork-check.sh)
+    #    named the host packages this fresh image lacks; with no
+    #    notification service to accept the notification, the wrapper did
+    #    not remember the hint as shown. Its KVM/vhost-vsock advice depends
+    #    on whether the VM has nested virtualization, so isn't asserted.
+    TOOLS_HINT='Install the tools it needs: sudo apt install qemu-system-x86 ovmf virtiofsd'
+    HINT_STAMP="/home/$USER_NAME/snap/claude-code/common/cowork-hint"
+    test ! -e "$HINT_STAMP"
+
+    # With the fake notification service on the bus, the bundled gdbus
+    # delivers the notification and the hint is remembered; it's printed on
+    # stderr too. The wrapper notifies before exec'ing the app, so a short
+    # run is enough; output is captured through command substitution, not
+    # a file (see AGENTS.md).
+    as_user() {
+        runuser -u "$USER_NAME" -- env HOME="/home/$USER_NAME" \
+            XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS="$BUS" "$@"
+    }
+    as_user python3 /tmp/desktop-probe/fake-notifyd.py &
+    for _ in $(seq 20); do
+        [ -e /tmp/desktop-probe/notifyd.ready ] && break
+        sleep 0.5
+    done
+    test -e /tmp/desktop-probe/notifyd.ready
+    OUT=$(as_user timeout -k 5 15 xvfb-run -a snap run claude-code.desktop 2>&1) || true
+    pkill -u "$USER_NAME" -f fake-notifyd.py || true
+    echo "$OUT" | MATCH "$TOOLS_HINT"
+    cat /tmp/desktop-probe/notifications.txt
+    MATCH "^Claude\|Cowork is unavailable on this system\|$TOOLS_HINT\$" < /tmp/desktop-probe/notifications.txt
+    MATCH '^Then restart Claude\.$' < /tmp/desktop-probe/notifications.txt
+    MATCH "^$TOOLS_HINT\$" < "$HINT_STAMP"
+
+    cowork_hint() {
+        sh -c '. /snap/claude-code/current/bin/claude-desktop-cowork-check.sh; printf "%s\n" "$COWORK_HINT"'
+    }
+    apt-get install -y qemu-system-x86 ovmf virtiofsd
+    cowork_hint | NOMATCH 'apt install'
+
+    # 5. Without the component, the wrapper explains how to install it
+    #    (no zenity here, so on stderr) instead of failing obscurely.
+    snap remove claude-code+desktop
+    if OUT=$(runuser -u "$USER_NAME" -- snap run claude-code.desktop 2>&1); then
+        echo "wrapper succeeded without the component" >&2
+        exit 1
+    fi
+    echo "$OUT"
+    echo "$OUT" | MATCH 'snap install claude-code\+desktop'
+
+restore: |
+    journalctl -u claude-desktop-smoke --no-pager 2>&1 | tail -n 50 || true
+    systemctl stop claude-desktop-smoke 2>/dev/null || true
+    systemctl reset-failed claude-desktop-smoke 2>/dev/null || true
+    pkill -u "$(id -nu 1000)" -f '/claude-desktop( |$)' 2>/dev/null || true
+    pkill -u "$(id -nu 1000)" -f fake-notifyd.py 2>/dev/null || true
+    loginctl disable-linger "$(id -nu 1000)" 2>/dev/null || true
+    apt-get purge -y --autoremove qemu-system-x86 ovmf virtiofsd >/dev/null 2>&1 || true
+    # Step 5 removes the component; put it back for the other tasks.
+    if ! snap components claude-code | grep -q '^claude-code+desktop *installed'; then
+        snap install --dangerous "$(ls "$SPREAD_PATH"/claude-code+desktop_*.comp | sort -r | head -n 1)"
+    fi
+    rm -rf /tmp/desktop-probe "/home/$(id -nu 1000)/snap/claude-code/common/cowork-hint"

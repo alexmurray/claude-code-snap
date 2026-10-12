@@ -1,4 +1,5 @@
 *.snap
+*.comp
 __pycache__/
 
 # Local image-garden / spread artifacts (VM images and logs left behind by

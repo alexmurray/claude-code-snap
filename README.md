@@ -10,6 +10,14 @@ The snap is named **`claude-code`** with two apps:
 
 After the alias is granted, users can run just `claude`.
 
+An optional **`desktop` component** adds [Claude Desktop](https://code.claude.com/docs/en/desktop-linux) (beta), Anthropic's desktop app:
+
+```bash
+sudo snap install claude-code+desktop
+```
+
+Then launch **Claude** from your application launcher, or run `claude-code.desktop`. It's a separate component (~200 MB download) so CLI-only installs don't pay for it.
+
 ## What is Claude Code?
 
 Claude Code lives in your terminal, understands your codebase, and helps you code faster through natural language commands — editing files, running tests, and handling git workflows while you stay in control. It requires an Anthropic account (a Claude subscription, or API billing).
@@ -37,12 +45,15 @@ Inside the LXD build container:
 3. **Stage** the binary at `$SNAP/bin/claude`
 4. **Install `wl-clipboard`** from Ubuntu package via `stage-packages`, ELF-patched for classic confinement via snapcraft's `enable-patchelf` build-attribute (not a hand-written `patchelf` command — see AGENTS.md)
 5. **Install** wrapper script, AppArmor onexec helper, bash completion, and a static LICENSE notice for the bundled binary
+6. **Fetch** Claude Desktop's `.deb` from Anthropic's apt repository (its only distribution channel), verify its checksum against the repository's `Packages` index, and unpack the app into the `desktop` component
 
 ### Parts in snapcraft.yaml
 
 | Part | Plugin | What it does |
 |---|---|---|
 | `claude-code-binary` | `dump` | Fetch the per-arch native binary from `anthropics/claude-code`'s GitHub releases (URL built from the top-level `version:` field via `$CRAFT_PROJECT_VERSION`); verify its checksum |
+| `claude-desktop` | `nil` | Fetch Claude Desktop's `.deb` from Anthropic's apt repository; verify its checksum; unpack the app into the `desktop` component and set the component's version from the `.deb` |
+| `gdbus` | `nil` | Stage-package `gdbus` (from `libglib2.0-bin`), privately under `usr/libexec/claude-code/`, for the desktop wrapper's Cowork notification |
 | `wl-clipboard` | `nil` | Stage-package from Ubuntu for Wayland clipboard, patched for classic confinement |
 | `claude-code-configuration` | `nil` | Install wrapper script, AppArmor onexec helper (`claude-onexec.sh`), bash completion files, and the bundled binary's LICENSE notice |
 
@@ -59,16 +70,27 @@ Claude Code shells out to a clipboard tool resolved via `PATH`:
 
 Classic snaps run under a complain-mode AppArmor profile whose label is inherited by every child process. If Claude Code spawns a child that is itself a snap (e.g. `juju debug-log > file` run via its Bash tool), snap-confine rejects file descriptors opened under Claude Code's label and redirection fails with "bad file descriptor" (`canonical/pi-coding-agent-snap#26`, LP: #1849753). `claude.wrapper` arms AppArmor's onexec transition before exec'ing `claude` so it, and everything it spawns, runs fully unconfined — the same fix used by pi-coding-agent-snap.
 
+### Claude Desktop component
+
+The `desktop` component packages the official Claude Desktop `.deb` payload as-is (its maintainer scripts aren't run), launched through `claude-desktop.wrapper`:
+
+- Like the CLI, the app runs **unconfined** via the same AppArmor onexec workaround.
+- Chromium's sandbox is kept wherever the host allows unprivileged user namespaces. On Ubuntu 23.10+ (which restricts them, and where the `.deb`'s own AppArmor profile doesn't cover snap paths) the wrapper falls back to `--no-sandbox`.
+- Runtime libraries (GTK, NSS, ...) come from the host, matching upstream's Debian-based-distro support. Cowork needs the host's QEMU/KVM as [documented upstream](https://code.claude.com/docs/en/desktop-linux#cowork-requirements); if anything's missing, the wrapper sends a desktop notification (via a bundled `gdbus`, so the host needs no `notify-send`) saying exactly what to install or change.
+- Not provided: the GNOME Shell search provider and `.mcpb`/`.skill` MIME registrations, which the `.deb` sets up system-wide.
+- Building it requires network access to `downloads.claude.ai`, which enforces Anthropic's regional availability allowlist.
+
 ## Version management
 
 Version updates are handled by **Renovate** with custom regex managers — no cron jobs needed:
 
 - The Claude Code version in `snap/snapcraft.yaml`'s top-level `version:` field → tracked via Renovate's `github-releases` datasource against `anthropics/claude-code`
 - The expected version string in `tests/smoke/claude-code/task.yaml`
+- The Claude Desktop version in the `claude-desktop` part's `.deb` URL → tracked via Renovate's `deb` datasource against Anthropic's apt repository (independent of the CLI version; becomes the `desktop` component's version)
 
 When a new upstream Claude Code version is released, Renovate auto-creates a PR updating both locations.
 
-`version:` is the only place the version lives — both GitHub release asset URLs interpolate it via `$CRAFT_PROJECT_VERSION`. Renovate's datasource doesn't know binary content hashes, though, so `.github/workflows/update-checksums.yml` runs `scripts/update-checksums.py` on any PR touching `snap/snapcraft.yaml` to keep `EXPECTED_SHA256` in sync (see AGENTS.md for the details).
+`version:` is the only place the version lives — both GitHub release asset URLs interpolate it via `$CRAFT_PROJECT_VERSION`. Renovate's datasources don't know binary content hashes, though, so `.github/workflows/update-checksums.yml` runs `scripts/update-checksums.py` on any PR touching `snap/snapcraft.yaml` to keep `EXPECTED_SHA256` and `EXPECTED_DEB_SHA256` in sync (see AGENTS.md for the details).
 
 ## Project structure
 
@@ -79,6 +101,8 @@ claude-snap/
 │   │   └── icon.png             # Claude Code's own launch-screen mascot — see AGENTS.md
 │   ├── local/
 │   │   ├── claude.wrapper       # Wrapper script (unsets SNAP_* env vars, AppArmor onexec, PATH)
+│   │   ├── claude-desktop.wrapper # Claude Desktop wrapper (component check, onexec, sandbox fallback)
+│   │   ├── claude-desktop-cowork-check.sh # Cowork prerequisite check, sourced by the wrapper
 │   │   ├── claude-onexec.sh     # AppArmor onexec-arming logic, also sourced by the apparmor-onexec test
 │   │   └── claude.completion    # Hand-written bash completion
 │   └── snapcraft.yaml           # Snap build definition
@@ -88,7 +112,8 @@ claude-snap/
 │   └── smoke/
 │       ├── claude-code/task.yaml       # Install/help/version/license
 │       ├── clipboard/task.yaml         # wl-copy/wl-paste on PATH
-│       └── apparmor-onexec/task.yaml   # AppArmor onexec workaround
+│       ├── apparmor-onexec/task.yaml   # AppArmor onexec workaround
+│       └── desktop/task.yaml           # desktop component + Claude Desktop launch under Xvfb
 ├── .github/
 │   ├── actions/
 │   │   └── install-cached-snap/    # Snap caching action
@@ -117,8 +142,9 @@ sudo snap install snapcraft --classic
 # Build the snap
 snapcraft pack -v
 
-# Install locally
+# Install locally (snap, then the desktop component)
 sudo snap install --classic --dangerous ./claude-code_*.snap
+sudo snap install --dangerous ./claude-code+desktop_*.comp
 
 # Run (default app)
 claude-code
@@ -131,7 +157,7 @@ claude-code.claude
 
 Tests in this repository use [spread](https://github.com/snapcore/spread), the multi-machine test runner from the snap core team.
 
-The tests install the `claude-code_*.snap` from the repository root, so build it with `snapcraft pack` first (see [Building](#building)).
+The tests install the `claude-code_*.snap` and `claude-code+desktop_*.comp` from the repository root, so build it with `snapcraft pack` first (see [Building](#building)).
 
 ```bash
 sudo snap install image-garden
@@ -148,7 +174,7 @@ See [AGENTS.md](AGENTS.md) for project-specific rules. Claude Code itself is clo
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE). This covers only the snap packaging files in this repository; individual files carry their own SPDX headers crediting Canonical Ltd. where substantially adapted from pi-coding-agent-snap/opencode-snap, and Alex Murray for files written for this project. Claude Code itself is proprietary software, all rights reserved by Anthropic PBC; see https://code.claude.com/docs/en/overview.
+Apache-2.0 — see [LICENSE](LICENSE). This covers only the snap packaging files in this repository; individual files carry their own SPDX headers crediting Canonical Ltd. where substantially adapted from pi-coding-agent-snap/opencode-snap, and Alex Murray for files written for this project. Claude Code and Claude Desktop are proprietary software, all rights reserved by Anthropic PBC; see https://code.claude.com/docs/en/overview.
 
 ## See also
 

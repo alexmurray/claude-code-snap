@@ -10,6 +10,7 @@ on:
     paths:
       - 'snap/snapcraft.yaml'
       - 'snap/local/**'
+      - 'snap/gui/**'
       - '.image-garden.mk'
       - 'spread.yaml'
       - 'tests/**'
@@ -18,6 +19,7 @@ on:
     paths:
       - 'snap/snapcraft.yaml'
       - 'snap/local/**'
+      - 'snap/gui/**'
       - '.image-garden.mk'
       - 'spread.yaml'
       - 'tests/**'

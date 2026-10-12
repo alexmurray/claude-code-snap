@@ -21,6 +21,13 @@ description: |
   package cannot build it from source: it fetches the published release
   binary directly and wraps it for classic confinement.
 
+  The optional `desktop` component adds Claude Desktop (beta), Anthropic's
+  desktop app with Chat, Cowork and Claude Code tabs, from Anthropic's
+  official .deb package. Install it with `snap install claude-code+desktop`
+  and launch "Claude" from your application launcher. Like the upstream
+  package, it targets Debian-based desktops (Ubuntu 22.04+, Debian 12+) and
+  uses the host's GTK, NSS and related desktop libraries.
+
   The snap packaging is maintained separately at
   https://github.com/alexmurray/claude-snap
 contact: https://github.com/alexmurray/claude-snap/issues
@@ -31,6 +38,20 @@ assumes: [snapd2.76]
 
 grade: stable
 confinement: classic
+
+components:
+  desktop:
+    type: standard
+    summary: Claude Desktop (beta)
+    description: |
+      Claude Desktop, Anthropic's desktop app for Chat, Cowork and Claude
+      Code, from Anthropic's official .deb package. Run it with
+      `claude-code.desktop` or launch "Claude" from your application
+      launcher.
+    # Claude Desktop is versioned independently of the CLI (e.g. 2.31226.1
+    # vs 2.1.295), so the component gets its own version, read from the
+    # .deb's control file by the claude-desktop part.
+    adopt-info: claude-desktop
 
 platforms:
   amd64:
@@ -51,6 +72,10 @@ apps:
     completer: usr/share/bash-completion/completions/claude.completion
     environment:
       DISABLE_AUTOUPDATER: "1"
+  # No `desktop:` key: the claude-desktop part installs upstream's desktop
+  # entry straight into meta/gui instead — see there for why.
+  desktop:
+    command: bin/claude-desktop.wrapper
 
 parts:
   # ============================================================
@@ -113,6 +138,108 @@ parts:
       chmod 755 "${CRAFT_PART_INSTALL}/claude"
 
   # ============================================================
+  # claude-desktop — Anthropic's prebuilt Electron desktop app, routed
+  # into the `desktop` component. Claude Desktop is published only as a
+  # .deb in Anthropic's apt repository on downloads.claude.ai (not on
+  # GitHub), so this part fetches the .deb straight from that repository's
+  # package pool. That host enforces Anthropic's regional
+  # service-availability allowlist, so unlike claude-code-binary this part
+  # can only be built from a supported country — see AGENTS.md.
+  #
+  # The version lives only in this source URL (Renovate's `deb` datasource
+  # tracks it); $CRAFT_ARCH_BUILD_FOR expands to amd64/arm64, which are
+  # also the Debian architecture names the repository uses. The
+  # component's version is read back out of the .deb itself below, so it
+  # can't drift from the URL.
+  # ============================================================
+  claude-desktop:
+    plugin: nil
+    source: https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_2.31226.1_$CRAFT_ARCH_BUILD_FOR.deb
+    source-type: file
+    organize:
+      claude-desktop/: (component/desktop)/
+    override-build: |
+      set -ex
+      DEB=$(ls "$CRAFT_PART_SRC"/claude-desktop_*.deb)
+
+      # Verify the .deb's sha256 against a pinned known-good value, taken
+      # from the SHA256 field of the repository's Packages index (itself
+      # covered by the repository's PGP-signed InRelease; signature not
+      # verified at build time, same as claude-code-binary). Pinned per
+      # arch here for the same reason as claude-code-binary — see
+      # AGENTS.md. scripts/update-checksums.py recomputes these.
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64)
+          EXPECTED_DEB_SHA256=5a9bebdfcb1df6ce38767b373f3a7fabf77156a2ddd8a3f5d04961da5bde305e
+          ;;
+        arm64)
+          EXPECTED_DEB_SHA256=d2f57a38ffc73cfda660f8772a5f8bada05e6d74399948a268c6f5d53593ee8f
+          ;;
+      esac
+      ACTUAL_DEB_SHA256=$(sha256sum "$DEB" | cut -d' ' -f1)
+      if [ "$ACTUAL_DEB_SHA256" != "$EXPECTED_DEB_SHA256" ]; then
+        echo "ERROR: claude-desktop .deb checksum mismatch for $CRAFT_ARCH_BUILD_FOR" >&2
+        echo "  expected: $EXPECTED_DEB_SHA256" >&2
+        echo "  actual:   $ACTUAL_DEB_SHA256" >&2
+        exit 1
+      fi
+
+      craftctl set components.desktop.version="$(dpkg-deb -f "$DEB" Version)"
+
+      # Unpack only the payload: the maintainer scripts aren't run. What
+      # they'd do on a host (register the apt repository, an AppArmor
+      # userns profile, the GNOME search provider and MIME types, and a
+      # /usr/bin/ccd link) is system-wide state a snap doesn't install —
+      # see AGENTS.md for which of those matter.
+      rm -rf "$CRAFT_PART_BUILD/deb"
+      dpkg-deb -x "$DEB" "$CRAFT_PART_BUILD/deb"
+
+      # The app tree goes into the component (via organize above).
+      # chrome-sandbox is Chromium's setuid-root sandbox helper: a snap
+      # can't ship a working setuid binary, so drop it rather than ship a
+      # dead one — claude-desktop.wrapper handles the sandbox instead.
+      # (rm first so a rebuild after an interrupted one doesn't copy the
+      # tree into a leftover copy of itself.)
+      rm -rf "$CRAFT_PART_INSTALL/claude-desktop"
+      cp -a "$CRAFT_PART_BUILD/deb/usr/lib/claude-desktop" "$CRAFT_PART_INSTALL/claude-desktop"
+      rm -f "$CRAFT_PART_INSTALL/claude-desktop/chrome-sandbox"
+      install -Dm644 "$CRAFT_PART_BUILD/deb/usr/share/doc/claude-desktop/copyright" \
+        "$CRAFT_PART_INSTALL/claude-desktop/copyright"
+
+      # The icon and desktop entry go into the main snap (snapd only reads
+      # desktop entries from there), so the launcher entry exists even
+      # before the component is installed; claude-desktop.wrapper explains
+      # how to install it in that case.
+      install -Dm644 "$CRAFT_PART_BUILD/deb/usr/share/icons/hicolor/256x256/apps/claude-desktop.png" \
+        "$CRAFT_PART_INSTALL/usr/share/icons/hicolor/256x256/apps/claude-desktop.png"
+
+      # The desktop entry is upstream's own, with its launch command and
+      # icon pointed at the snap, so new actions, MIME types etc. carry
+      # over automatically. Installed straight into meta/gui (snapd exports
+      # it as claude-code_desktop.desktop) rather than via the `desktop`
+      # app's `desktop:` key: snapcraft would overwrite that entry's Icon=
+      # with the snap-level icon (snap/gui/icon.png, the CLI's mascot).
+      # snapd only accepts Exec= lines that run one of the snap's own apps,
+      # so fail the build if upstream changes its command in a way this
+      # rewrite doesn't cover, rather than ship a broken launcher.
+      DESKTOP_FILE="$CRAFT_PART_INSTALL/meta/gui/desktop.desktop"
+      install -Dm644 "$CRAFT_PART_BUILD/deb/usr/share/applications/com.anthropic.Claude.desktop" \
+        "$DESKTOP_FILE"
+      sed -i \
+        -e 's|^Exec=claude-desktop$|Exec=claude-code.desktop|' \
+        -e 's|^Exec=claude-desktop |Exec=claude-code.desktop |' \
+        -e 's|^Icon=claude-desktop$|Icon=${SNAP}/usr/share/icons/hicolor/256x256/apps/claude-desktop.png|' \
+        "$DESKTOP_FILE"
+      if grep '^Exec=' "$DESKTOP_FILE" | grep -v -E '^Exec=claude-code\.desktop( |$)'; then
+        echo "ERROR: unexpected Exec= line(s) in upstream's desktop entry (above)" >&2
+        exit 1
+      fi
+      if grep '^Icon=' "$DESKTOP_FILE" | grep -v '^Icon=\${SNAP}/'; then
+        echo "ERROR: unexpected Icon= line(s) in upstream's desktop entry (above)" >&2
+        exit 1
+      fi
+
+  # ============================================================
   # wl-clipboard — Wayland clipboard tools from Ubuntu package.
   # Needed for clipboard support on Wayland (default display server).
   # Claude Code shells out to wl-copy/wl-paste on Wayland, falling back
@@ -144,11 +271,38 @@ parts:
       - enable-patchelf
 
   # ============================================================
-  # Configuration — wrapper script, bash completion
+  # gdbus — for claude-desktop.wrapper's Cowork notification. Talks to
+  # the desktop's org.freedesktop.Notifications service directly, rather
+  # than relying on the host having notify-send (libnotify-bin, optional
+  # on many distros) or bundling it (libnotify4 pulls in gdk-pixbuf and its
+  # host-path loader plugins). core26 already has the GLib/GIO libraries
+  # gdbus links against; its own dbus-send can't encode Notify's a{sv}
+  # argument.
+  #
+  # Staged under usr/libexec/claude-code/, not usr/bin/: the wrappers
+  # prepend $SNAP/usr/bin to PATH (for wl-copy/wl-paste), and a gdbus
+  # there would shadow the host's for everything the app and Claude Code
+  # run. enable-patchelf points it at core26's libraries, as for
+  # wl-clipboard below.
+  # ============================================================
+  gdbus:
+    plugin: nil
+    stage-packages:
+      - libglib2.0-bin
+    organize:
+      usr/bin/gdbus: usr/libexec/claude-code/gdbus
+    stage:
+      - usr/libexec/claude-code/gdbus
+    build-attributes:
+      - enable-patchelf
+
+  # ============================================================
+  # Configuration — wrapper scripts, bash completion
   # ============================================================
   claude-code-configuration:
     after:
       - claude-code-binary
+      - claude-desktop
     plugin: nil
     source: snap/local
     override-build: |
@@ -162,3 +316,7 @@ parts:
         "$CRAFT_PART_INSTALL"/usr/share/bash-completion/completions/claude.completion
       install -Dm644 "$CRAFT_PART_SRC"/claude-LICENSE.md \
         "$CRAFT_PART_INSTALL"/usr/share/doc/claude-code/LICENSE.md
+      install -Dm755 "$CRAFT_PART_SRC"/claude-desktop.wrapper \
+        "$CRAFT_PART_INSTALL"/bin/claude-desktop.wrapper
+      install -Dm644 "$CRAFT_PART_SRC"/claude-desktop-cowork-check.sh \
+        "$CRAFT_PART_INSTALL"/bin/claude-desktop-cowork-check.sh

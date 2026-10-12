@@ -26,6 +26,20 @@
     },
     {
       "customType": "regex",
+      "description": "Update the pinned Claude Desktop version in the claude-desktop part's .deb source URL in snapcraft.yaml (the component's version is read back out of the .deb at build time). scripts/update-checksums.py handles EXPECTED_DEB_SHA256 separately.",
+      "managerFilePatterns": [
+        "snap/snapcraft\\.yaml"
+      ],
+      "matchStrings": [
+        "/claude-desktop_(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)_\\$CRAFT_ARCH_BUILD_FOR\\.deb"
+      ],
+      "datasourceTemplate": "deb",
+      "depNameTemplate": "claude-desktop",
+      "registryUrlTemplate": "https://downloads.claude.ai/claude-desktop/apt/stable?suite=stable&components=main&binaryArch=amd64",
+      "versioningTemplate": "deb"
+    },
+    {
+      "customType": "regex",
       "description": "Update the expected Claude Code version in task.yaml",
       "managerFilePatterns": [
         "tests/smoke/claude-code/task\\.yaml"

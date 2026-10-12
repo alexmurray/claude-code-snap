@@ -21,6 +21,12 @@ Anthropic's regional service-availability allowlist, which would make the
 neither problem and the strongest provenance (a real signature, not just
 an unsigned manifest). All three channels serve byte-identical binaries.
 
+The snap also has an optional **`desktop` component** carrying Claude
+Desktop (beta), Anthropic's Electron desktop app — modeled on
+opencode-snap's `desktop` component. See
+[Claude Desktop component](#claude-desktop-component) below; it has a
+different upstream channel and version from the CLI.
+
 ### Why not strict confinement
 
 [pfsmorigo/snaps](https://github.com/pfsmorigo/snaps) already publishes a
@@ -67,24 +73,31 @@ doesn't:
    tools are left to the host).
 5. Install wrapper script, bash completion, and a static LICENSE notice for
    the bundled binary (the release tarball holds only the bare binary).
+6. Fetch Claude Desktop's `.deb` from Anthropic's apt repository, verify its
+   sha256 against a value pinned from the repository's `Packages` index,
+   unpack it, and route the app tree into the `desktop` component (see
+   [Claude Desktop component](#claude-desktop-component)).
 
 ## Key files
 
 | File | Purpose |
 |---|---|
-| `snap/snapcraft.yaml` | Snap build definition with 3 parts |
+| `snap/snapcraft.yaml` | Snap build definition with 5 parts and the `desktop` component |
 | `snap/local/claude.wrapper` | Wrapper that unsets `SNAP_*` env vars, sources `claude-onexec.sh`, prepends bundled clipboard tools to PATH |
 | `snap/local/claude-onexec.sh` | AppArmor onexec-arming logic, shared with `tests/smoke/apparmor-onexec/task.yaml` |
 | `snap/local/claude.completion` | Hand-written bash completion (claude has no completion generator) |
 | `snap/local/claude-LICENSE.md` | Static copy of the bundled binary's LICENSE notice |
+| `snap/local/claude-desktop.wrapper` | Desktop app wrapper: checks the component is installed, notifies about missing Cowork prerequisites, sources `claude-onexec.sh`, picks `--no-sandbox` only where needed, execs the component's Electron binary |
+| `snap/local/claude-desktop-cowork-check.sh` | Mirrors the app's Cowork prerequisite checks; sets `COWORK_HINT`. Sourced by the wrapper and `tests/smoke/desktop` |
 | `snap/gui/icon.png` | Claude Code's own launch-screen mascot |
-| `scripts/update-checksums.py` | Recomputes pinned checksums from `version:`; run by `update-checksums.yml`, safe by hand |
-| `renovate.json` | Custom regex managers (`github-releases` datasource against `anthropics/claude-code`) |
+| `scripts/update-checksums.py` | Recomputes pinned CLI and desktop `.deb` checksums from the pinned versions; run by `update-checksums.yml`, safe by hand |
+| `renovate.json` | Custom regex managers (`github-releases` datasource against `anthropics/claude-code`, `deb` datasource against the Claude Desktop apt repo) |
 | `spread.yaml` | Spread test backend config (image-garden adhoc backend) |
 | `.image-garden.mk` | image-garden cloud-init user-data templates (core26) |
 | `tests/smoke/claude-code/task.yaml` | Install/help/version/license smoke test |
 | `tests/smoke/clipboard/task.yaml` | Verifies bundled wl-copy/wl-paste are on PATH and actually run |
 | `tests/smoke/apparmor-onexec/task.yaml` | Verifies the AppArmor onexec workaround |
+| `tests/smoke/desktop/task.yaml` | Verifies the `desktop` component installs, its desktop entry is exported, and Claude Desktop launches under Xvfb: unconfined, a process it spawns can redirect a strict snap's output (LP: #1849753), sandbox only disabled where needed, Cowork hint remembered, and the missing-component message |
 | `.github/workflows/build.yml` | CI entry point; delegates to `tasteful-crafts.yml` |
 | `.github/workflows/tasteful-crafts.yml` | Reusable build → spread-test orchestrator (no publish step) |
 | `.github/workflows/snapcraft-pack.yml` | Per-architecture snap build (reusable, uses LXD) |
@@ -100,13 +113,16 @@ doesn't:
 - **Confinement**: `classic` (needs unrestricted filesystem access to edit
   the user's code and run arbitrary shell commands)
 - **Platforms**: amd64, arm64
+- **Components**: `desktop` (standard) — Claude Desktop, installed
+  separately with `snap install claude-code+desktop`
 - **Runtime**: the bundled `claude` binary is a Bun-compiled standalone
   executable (dynamically linked against the host's glibc/libpthread/libdl/
   librt/libm) — no bundled language runtime, unlike pi-coding-agent-snap's
   bundled Node.js
 - **CI pipeline**: `build.yml` → `tasteful-crafts.yml` builds the snap for
   both architectures (LXD) and runs image-garden spread integration tests
-  against the amd64 build across Ubuntu/Debian cloud systems. It does not
+  against the amd64 build (snap + `desktop` component) across
+  Ubuntu/Debian/Fedora cloud systems. It does not
   publish anything — publishing to the Snap Store is handled by
   [Launchpad's snap recipe integration](https://snapcraft.io/claude-code/builds),
   which builds directly from this repository, not by GitHub Actions.
@@ -127,6 +143,26 @@ hashes, so `.github/workflows/update-checksums.yml` runs
 fixup commit if they've drifted. No-op when already correct; safe to run by
 hand (`python3 scripts/update-checksums.py`). Skips itself cleanly on fork
 PRs, where `GITHUB_TOKEN` can't push back.
+
+Claude Desktop is versioned independently (e.g. `2.31226.1` vs the CLI's
+`2.1.295`) and pinned separately, in the `claude-desktop` part's single
+`.deb` source URL (`claude-desktop_<version>_$CRAFT_ARCH_BUILD_FOR.deb` —
+craft-parts expands `$CRAFT_ARCH_BUILD_FOR` in `source:`, and Debian's arch
+names match craft's). Renovate's `deb` datasource tracks it against the apt
+repository's amd64 index, and the same `update-checksums.py` run fixes
+`EXPECTED_DEB_SHA256`, taking it from each arch's `Packages` index rather
+than downloading the ~180 MB `.deb`. The component's version is read from
+the `.deb`'s own control file at build time
+(`craftctl set components.desktop.version=`), so it can't drift from the
+URL. A desktop-only bump doesn't change the snap's `version:`, so
+`release.yml`'s tags (which track the CLI version) are unaffected.
+
+Since Renovate only watches the amd64 index, a bump can land before arm64
+publishes the same version. `update-checksums.py` then updates the arches
+it can, leaves the missing one's pin alone and exits 2;
+`update-checksums.yml` commits the partial update and fails with a "re-run
+once it's published" error rather than a confusing checksum mismatch
+later.
 
 ## Clipboard strategy
 
@@ -190,6 +226,143 @@ Two things to keep in mind if this test or `claude.wrapper` ever change:
   immediately `exec sh -c '...'`, with all the real work inside that
   already-transitioned shell).
 
+## Claude Desktop component
+
+Claude Desktop (beta) is Anthropic's Electron desktop app
+([docs](https://code.claude.com/docs/en/desktop-linux)). It ships as the
+snap's `desktop` component (~590 MB unpacked), so CLI-only users don't
+download it, and launches via the `claude-code.desktop` app / the "Claude"
+launcher entry.
+
+### Source: Anthropic's apt repository, not GitHub
+
+Unlike the CLI, Claude Desktop is published *only* as a `.deb` in
+Anthropic's apt repository on `downloads.claude.ai` — the channel the CLI
+avoids because that host enforces Anthropic's regional
+service-availability allowlist. There's no alternative, so **building the
+`desktop` component (and therefore the snap) requires a builder in a
+supported country**. Launchpad's and GitHub Actions' builders currently
+are; a contributor building from an unsupported region will see the
+`claude-desktop` part's fetch fail.
+
+The launcher entry is upstream's own `com.anthropic.Claude.desktop`, taken
+from the `.deb` at build time: the part rewrites each `Exec=` (including
+the desktop actions') to `claude-code.desktop` and `Icon=` to the bundled
+icon, and installs it straight into `meta/gui/desktop.desktop` (snapd
+exports it as `claude-code_desktop.desktop`), so upstream's new actions,
+MIME types etc. carry over without a hand-maintained copy. Two things it
+works around: snapcraft's own rewrite (an app's `desktop:` key) would
+overwrite `Icon=` with the snap-level icon (`snap/gui/icon.png`, the CLI's
+mascot), and snapd only accepts `Exec=` lines that run one of the snap's
+own apps. The build fails if any `Exec=`/`Icon=` line isn't as expected
+after the rewrite (e.g. upstream starts launching via `env FOO=1
+claude-desktop`), rather than shipping a broken launcher.
+`tests/smoke/desktop` checks the exported entry, actions included.
+
+The part takes the `.deb`'s payload only (`dpkg-deb -x`); its maintainer
+scripts never run. On a host they'd register the apt repository and
+unattended-upgrades origin (irrelevant: the snap updates through the
+store), an AppArmor userns profile for `/usr/lib/claude-desktop/...`
+(doesn't apply to snap paths — see below), a GNOME Shell search provider
+and the `.mcpb`/`.skill` MIME types (system-wide registrations a snap
+can't make: not provided), and a `/usr/bin/ccd` link (not shipped by
+current builds).
+
+Runtime libraries (GTK 3, NSS, libsecret, ...) come from the host, as with
+opencode-snap's desktop component, matching the upstream `.deb`'s Debian-
+based-distro support; nothing is bundled. Cowork needs the host's QEMU/KVM
+exactly as documented upstream.
+
+### Deliberately not bundled: QEMU, firmware, GTK and friends
+
+The boundary is the process: the snap ships Anthropic's binaries, the host
+provides what they load or run. Don't re-propose bundling these without new
+information:
+
+- **Cowork (QEMU/OVMF/virtiofsd/KVM)**: the app finds `qemu-system-*` via
+  `PATH`, but checks the UEFI firmware (`/usr/share/OVMF/...`,
+  `/usr/share/AAVMF/...`) and `virtiofsd` (`/usr/libexec/virtiofsd`,
+  `/usr/bin/virtiofsd`) only at hardcoded host paths, and only uses its own
+  bundled `virtiofsd` on Ubuntu 22.04. A classic snap can't supply files at
+  those paths, and `/dev/kvm`/`vhost_vsock`/`kvm` group membership are host
+  kernel/admin state anyway. Bundling QEMU alone would still leave users
+  installing `ovmf virtiofsd` from apt, so it buys nothing; making the rest
+  work would mean patching Anthropic's `app.asar`, which this repo doesn't
+  do.
+- **GTK/NSS/Mesa and the rest of Electron's ~20 non-core26 libraries**:
+  mechanically easy (`stage-packages` + `enable-patchelf`), but bundled
+  GTK/GIO/gdk-pixbuf/Mesa still load plugins from compiled-in host paths
+  (ABI mismatches across host releases), and redirecting them needs env
+  vars (`GTK_PATH`, `GIO_MODULE_DIR`, `LIBGL_DRIVERS_PATH`, ...) that the
+  app would leak into its integrated terminal and Claude Code's tools — the
+  VS Code classic snap's long-running bug class, which the wrappers'
+  `SNAP_*` unsetting exists to avoid. These libraries are present on any
+  desktop host the app makes sense on.
+
+Since the host must provide these, the wrapper at least says what's
+missing: the app only reports it inside the Cowork tab (whose visibility
+is controlled by claude.ai's web UI, so it may not show at all) and logs
+just `status=unsupported`. `claude-desktop-cowork-check.sh` mirrors the
+app's checks (read from its bundle; keep in sync if a release changes
+them) and the wrapper sends a desktop notification with the exact
+`apt install`/`usermod -aG kvm` fix, once per distinct set of problems
+(remembered in `$SNAP_USER_COMMON/cowork-hint`, written only once the
+notification is accepted, so a launch with no notification daemon doesn't
+count as shown), plus a stderr line on every launch.
+
+The notification goes straight to the `org.freedesktop.Notifications`
+D-Bus service via a bundled `gdbus` (the `gdbus` part), not `notify-send`:
+`libnotify-bin` is optional on many distros, and bundling it would pull in
+gdk-pixbuf and its host-path loader plugins. `gdbus` needs only GLib/GIO,
+which core26 already has (core26's own `dbus-send` can't encode
+`Notify`'s `a{sv}` argument). It lives in `$SNAP/usr/libexec/claude-code/`,
+not `$SNAP/usr/bin/`, so the wrappers' PATH prepend (for `wl-copy`/
+`wl-paste`) doesn't shadow the host's `gdbus` for the app and Claude Code;
+and it runs with `GIO_MODULE_DIR` pointed at a nonexistent directory, for
+that one command only, so core26's GIO never loads the host's GIO modules.
+Two gotchas if it changes: `gdbus call` needs `--` before the arguments,
+or it reads the trailing `-1` (server-default expiry) as an option; and in
+`tests/smoke/desktop`, the bus must be the user's systemd instance's
+(lingering + `dbus-user-session`), not a bare `dbus-run-session` one —
+with a session bus present, `snap run` asks the systemd user instance on
+it to track the app's processes and refuses to run without one.
+
+### Confinement and Chromium's sandbox
+
+`claude-desktop.wrapper` sources the same `claude-onexec.sh` as
+`claude.wrapper`, so the app and everything it spawns run unconfined (same
+LP: #1849753 reasoning). opencode-snap instead keeps its main process under
+the snap label and patches its *own* JS bundle to arm onexec for children
+only; this snap can't reasonably patch Anthropic's `app.asar`, and doesn't
+need the snap label for dock grouping either — the desktop entry's
+`StartupWMClass=com.anthropic.Claude` matches the app's WM_CLASS/app_id.
+
+Running unconfined has a consequence for Chromium's renderer sandbox,
+which needs either unprivileged user namespaces or the setuid
+`chrome-sandbox` helper. A snap can't ship a working setuid binary (the
+part deletes it), and on Ubuntu 23.10+
+(`kernel.apparmor_restrict_unprivileged_userns=1`) unconfined processes
+can't use user namespaces either — the upstream `.deb` solves that with an
+AppArmor profile attached to its own `/usr/lib` path, which doesn't cover
+`/snap/...`. So the wrapper passes `--no-sandbox` **only** when that sysctl
+(or Debian's `kernel.unprivileged_userns_clone=0`) blocks it, and keeps the
+sandbox everywhere else. opencode-snap passes `--no-sandbox`
+unconditionally. `tests/smoke/desktop` checks both branches: `--no-sandbox`
+present on Ubuntu, and on Debian absent with renderers actually in their
+own user namespace.
+
+`tests/smoke/desktop` also checks the onexec workaround end to end, from a
+process the app itself spawns: at every startup (before any sign-in) the
+app runs the user's login shell (`$SHELL -l -i -c '... env -0 ...'`, from
+a utility process) to load their environment, so the test points `$SHELL`
+at a probe script that redirects `snap run hello-world` to a file. Without
+onexec that redirect fails (`rc=1` under `snap.claude-code.desktop
+(complain)` — verified on Ubuntu 26.04 and Debian 13 when the test was
+written); with it, it succeeds. Signed-in paths (Code tab sessions, which
+run a `claude` binary the app downloads itself into
+`~/.config/Claude/claude-code/<version>/` rather than the snap's; Cowork's
+VM) can't be exercised headlessly and are untested.
+
 ## License
 
 Apache-2.0 for the snap packaging files in this repository. This project
@@ -205,7 +378,8 @@ provenance per file:
   `install-cached-snap/action.yaml`+`action.sh`, `.image-garden.mk`
 - **Canonical Ltd. + Alex Murray** (adapted/modified): `build.yml`,
   `tasteful-crafts.yml`, `release.yml`, `spread.yaml`, `claude.wrapper`,
-  `claude-onexec.sh`, the `clipboard` and `apparmor-onexec` smoke tests
+  `claude-desktop.wrapper`, `claude-onexec.sh`, the `clipboard`,
+  `apparmor-onexec` and `desktop` smoke tests
 - **Alex Murray only** (written for this project): `snap/snapcraft.yaml`,
   `claude.completion`, the `claude-code` smoke test
 
@@ -216,6 +390,7 @@ being structurally derived from the same two repos — noted here instead.
 used to identify the packaged product (nominative use), not under this
 repo's license, not implying endorsement.
 
-Claude Code itself is proprietary software — all rights reserved by
-Anthropic PBC; see https://code.claude.com/docs/en/overview. This project is
+Claude Code and Claude Desktop are proprietary software — all rights
+reserved by Anthropic PBC (the component carries the `.deb`'s own
+`copyright` file); see https://code.claude.com/docs/en/overview. This project is
 unofficial and not affiliated with or endorsed by Anthropic.

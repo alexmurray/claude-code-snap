@@ -54,6 +54,14 @@ prepare: |
     fi
     snap install "$SNAP_FILE" --dangerous --classic
 
+    # Install the desktop component built alongside the snap.
+    COMP_FILE="$(ls ./claude-code+desktop_*.comp 2>/dev/null | sort -r | head -n 1)"
+    if [ -z "$COMP_FILE" ]; then
+        echo "No claude-code+desktop_*.comp found in $PWD" >&2
+        exit 1
+    fi
+    snap install "$COMP_FILE" --dangerous
+
 debug-each: |
     echo "Kernel and architecture:"
     uname -a
