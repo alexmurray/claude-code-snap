@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Alex Murray
+name: update checksums
+
+# Renovate's github-releases datasource bumps the Claude Code version in
+# snap/snapcraft.yaml's top-level version: field, but it only knows version
+# strings — it has no way to also know the matching binary content hashes,
+# so it can't update the EXPECTED_SHA256 values pinned in the same file's
+# override-build. This workflow closes that gap: it runs
+# scripts/update-checksums.py on any PR that touches snap/snapcraft.yaml
+# (Renovate's own PRs included) and pushes a fixup commit if the pinned
+# checksums don't match what the currently-declared version actually
+# resolves to.
+on:
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - 'snap/snapcraft.yaml'
+
+permissions:
+  contents: write
+
+jobs:
+  update-checksums:
+    name: update checksums
+    runs-on: ubuntu-24.04
+    # GITHUB_TOKEN can only push to branches in this repository, not to a
+    # fork — and GitHub already strips write permissions from the token on
+    # pull_request-triggered runs for fork PRs, so this would fail anyway.
+    # Skip cleanly instead of failing confusingly for external contributors;
+    # a maintainer can run scripts/update-checksums.py locally and push.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Update checksums
+        id: update
+        run: |
+          set -euo pipefail
+          output="$(python3 scripts/update-checksums.py)"
+          echo "$output"
+          echo "changed=$(echo "$output" | tail -1 | cut -d= -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push if changed
+        if: ${{ steps.update.outputs.changed == 'true' }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add snap/snapcraft.yaml
+          git commit -m "Update claude-code binary checksums in snap/snapcraft.yaml"
+          git push origin "HEAD:${{ github.event.pull_request.head.ref }}"

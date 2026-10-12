@@ -1,0 +1,41 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/examples/**",
+    "**/__fixtures__/**"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Update the pinned Claude Code version in snapcraft.yaml's top-level version: field (both source URLs interpolate it via $CRAFT_PROJECT_VERSION). scripts/update-checksums.py handles EXPECTED_SHA256 separately.",
+      "managerFilePatterns": [
+        "snap/snapcraft\\.yaml"
+      ],
+      "matchStrings": [
+        "\\nversion: \"(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "anthropics/claude-code",
+      "versioningTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "description": "Update the expected Claude Code version in task.yaml",
+      "managerFilePatterns": [
+        "tests/smoke/claude-code/task\\.yaml"
+      ],
+      "matchStrings": [
+        "MATCH \"(?<currentValue>[0-9]+\\.[0-9]+\\.[0-9]+) \\(Claude Code\\)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "anthropics/claude-code",
+      "versioningTemplate": "npm"
+    }
+  ]
+}

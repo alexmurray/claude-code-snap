@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Canonical Ltd.
+# SPDX-FileCopyrightText: Alex Murray
+
+project: claude-snap
+
+backends:
+    garden:
+        type: adhoc
+        allocate: |
+            # Runs on the host from the project directory, so bail out before
+            # booting a VM if there is no snap for prepare to install. FATAL
+            # (rather than a non-zero exit) stops spread retrying allocation.
+            if ! ls ./claude-code_*.snap >/dev/null 2>&1; then
+                echo "<FATAL no claude-code_*.snap found in $PWD; run snapcraft pack first>"
+                exit 0
+            fi
+            if [ -n "${SPREAD_HOST_PATH-}" ]; then
+                PATH="${SPREAD_HOST_PATH}"
+            fi
+            exec image-garden allocate --spread \
+               "$SPREAD_SYSTEM"."${SPREAD_ARCH:=$(uname -m)}"
+        discard: |
+            if [ -n "${SPREAD_HOST_PATH-}" ]; then
+                PATH="${SPREAD_HOST_PATH}"
+            fi
+            image-garden discard "$SPREAD_SYSTEM_ADDRESS"
+        systems:
+            - ubuntu-cloud-26.04:
+                  username: ubuntu
+                  password: ubuntu
+            - ubuntu-cloud-24.04:
+                  username: ubuntu
+                  password: ubuntu
+            - debian-cloud-13:
+                  username: debian
+                  password: debian
+            - fedora-cloud-43:
+                  username: root
+                  password: root
+
+exclude:
+    - ".git/*"
+    - "*.qcow2*"
+
+path: /root/claude-snap
+
+prepare: |
+    # Install the snap that was copied into the test environment.
+    SNAP_FILE="$(ls ./claude-code_*.snap 2>/dev/null | sort -r | head -n 1)"
+    if [ -z "$SNAP_FILE" ]; then
+        echo "No claude-code_*.snap found in $PWD" >&2
+        exit 1
+    fi
+    snap install "$SNAP_FILE" --dangerous --classic
+
+debug-each: |
+    echo "Kernel and architecture:"
+    uname -a
+
+    echo "OS release info:"
+    cat /etc/os-release
+
+    echo "Installed snaps:"
+    snap list
+
+suites:
+    tests/smoke/:
+        summary: Smoke tests for the claude-code snap

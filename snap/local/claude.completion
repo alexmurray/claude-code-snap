@@ -1,0 +1,155 @@
+# SPDX-FileCopyrightText: Alex Murray
+# SPDX-License-Identifier: Apache-2.0
+#
+# Bash completion for claude (Claude Code).
+# Provides basic flag and subcommand completion by hand, since the `claude`
+# binary has no built-in completion generator (e.g. no --get-yargs-completions).
+# Installed via the 'completer' key in snapcraft.yaml.
+
+_claude() {
+    local cur prev opts cmds
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    # If the previous word is a flag that takes a free-form value, let bash
+    # handle default (filename) completion instead of guessing.
+    case "$prev" in
+        --model|--agent|--fallback-model|--system-prompt|--append-system-prompt|\
+        --session-id|-n|--name|--effort|--max-budget-usd|--json-schema|\
+        --environment|--debug-file|--remote-control-session-name-prefix|\
+        --betas|--file)
+            return 0
+            ;;
+        --settings|--agents|--mcp-config|--plugin-dir)
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            return 0
+            ;;
+        --permission-mode)
+            opts="acceptEdits auto bypassPermissions manual dontAsk plan"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        --permission-prompts)
+            opts="host none"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        --output-format)
+            opts="text json stream-json"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        --input-format)
+            opts="text stream-json"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        --system-prompt-snapshot|--exclude-dynamic-system-prompt-sections)
+            opts="on off"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        --allowedTools|--allowed-tools|--disallowedTools|--disallowed-tools|--tools)
+            opts="Bash Edit Read Write Grep Glob WebFetch WebSearch NotebookEdit"
+            COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+            return 0
+            ;;
+        --add-dir)
+            COMPREPLY=( $(compgen -d -- "$cur") )
+            return 0
+            ;;
+    esac
+
+    # Subcommands (completed only in first position).
+    cmds="agents attach auth auto-mode doctor gateway import install logs mcp
+          plugin plugins purge respawn rm setup-token stop kill ultrareview
+          update upgrade"
+
+    if [[ "$cur" == -* ]]; then
+        opts="--add-dir
+              --agent
+              --agents
+              --allow-dangerously-skip-permissions
+              --allowedTools --allowed-tools
+              --append-system-prompt
+              --autocompact
+              --ax-screen-reader
+              --bg --background
+              --bare
+              --betas
+              --brief
+              --chrome
+              --cloud
+              -c --continue
+              --dangerously-skip-permissions
+              -d --debug
+              --debug-file
+              --desktop
+              --disable-slash-commands
+              --disallowedTools --disallowed-tools
+              --effort
+              --environment
+              --exclude-dynamic-system-prompt-sections
+              --fallback-model
+              --file
+              --fork-session
+              --forward-subagent-text
+              --from-pr
+              -h --help
+              --ide
+              --include-hook-events
+              --include-partial-messages
+              --input-format
+              --json-schema
+              --max-budget-usd
+              --mcp-config
+              --model
+              -n --name
+              --no-chrome
+              --no-session-persistence
+              --output-format
+              --permission-mode
+              --permission-prompts
+              --plugin-dir
+              --plugin-url
+              -p --print
+              --prompt-suggestions
+              --remote-control
+              --remote-control-session-name-prefix
+              --replay-user-messages
+              --restricted
+              -r --resume
+              --safe-mode
+              --session-id
+              --setting-sources
+              --settings
+              --strict-mcp-config
+              --system-prompt
+              --system-prompt-snapshot
+              --teleport
+              --tmux
+              --tools
+              --verbose
+              -v --version
+              -w --worktree"
+        COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+        return 0
+    fi
+
+    if [[ "$COMP_CWORD" -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+        return 0
+    fi
+
+    # File completion for @file arguments in the prompt.
+    if [[ "$cur" == @* ]]; then
+        local file="${cur#@}"
+        COMPREPLY=( $(compgen -f -- "$file" | sed 's/^/@/') )
+        return 0
+    fi
+
+    return 0
+}
+complete -o default -F _claude claude
+complete -o default -F _claude claude-code

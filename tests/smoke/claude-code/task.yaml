@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Alex Murray
+
+summary: Smoke test for the claude-code snap
+details: |
+    This test verifies that the claude-code snap is properly installed,
+    launches without crashing, and prints help/version output. Tests both
+    the default app (claude-code) and the claude alias target.
+
+execute: |
+    # Verify the snap is installed.
+    snap list | MATCH "claude-code"
+
+    # Test the default app (claude-code).
+    snap run claude-code --help 2>&1 | MATCH "Claude Code"
+    snap run claude-code --version 2>&1 | MATCH "2.1.295 \(Claude Code\)"
+
+    # Test the claude alias target (claude-code.claude).
+    snap run claude-code.claude --help 2>&1 | MATCH "Claude Code"
+    snap run claude-code.claude --version 2>&1 | MATCH "2.1.295 \(Claude Code\)"
+
+    # The bundled native binary and doc files must be in place. (No
+    # README.md here — the GitHub release tarball holds only the bare
+    # binary, no accompanying docs the way the old npm tarball did;
+    # LICENSE.md is now a static file this repo maintains, not fetched
+    # per-build.)
+    test -x /snap/claude-code/current/bin/claude
+    test -e /snap/claude-code/current/usr/share/doc/claude-code/LICENSE.md
+
+    # claude --version must not go through the Node.js fallback wrapper
+    # (cli-wrapper.cjs) — that would mean the native binary failed to run.
+    test ! -e /snap/claude-code/current/node
+
+    # doctor should run without crashing and report itself as the native,
+    # bundled binary at the expected snap path. Exit status is checked for
+    # real (no `|| true`).
+    #
+    # Captured via command substitution, not `> file` redirection: a file
+    # opened by this unconfined shell, then inherited across snap-confine's
+    # launch of the complain-mode process, breaks writes through it from
+    # the other side (same class of bug the onexec workaround exists for,
+    # see AGENTS.md). Do not change this back to `> file`.
+    #
+    # Not asserted: doctor's "~/.local/bin is not in your PATH" / "config
+    # install method" / "claude command at .../.local/bin/claude missing or
+    # broken" warnings — expected and harmless, since this snap ships the
+    # binary directly rather than running `claude install`'s native
+    # installer (which is what sets up ~/.local/bin).
+    DOCTOR_OUTPUT=$(snap run claude-code doctor 2>&1)
+    DOCTOR_RC=$?
+    echo "$DOCTOR_OUTPUT"
+    [ "$DOCTOR_RC" -eq 0 ]
+    echo "$DOCTOR_OUTPUT" | MATCH 'Running: native \(2\.1\.295\)'
+    # doctor reports the resolved revision path (e.g. /snap/claude-code/x1/...),
+    # not the "current" symlink, so match any revision. Also tolerate
+    # /var/lib/snapd/snap/... : on Fedora /snap is only a symlink to that
+    # real location (see .image-garden.mk), and doctor's self-reported path
+    # resolves through it to the real location rather than the /snap alias.
+    echo "$DOCTOR_OUTPUT" | MATCH 'Path: (/snap|/var/lib/snapd/snap)/claude-code/[^/]+/bin/claude'

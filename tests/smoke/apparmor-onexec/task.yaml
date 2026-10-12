@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Canonical Ltd.
+# SPDX-FileCopyrightText: Alex Murray
+# SPDX-License-Identifier: Apache-2.0
+
+summary: Verify snaps launched by claude can redirect their output
+details: |
+    snapd gives classic snaps a complain-mode AppArmor profile whose label is
+    inherited by everything they spawn. When such a child is itself a snap,
+    snap-confine rejects file descriptors opened under that label, so e.g.
+    `juju debug-log > file` run by the agent fails with "bad file descriptor"
+    (see https://github.com/canonical/pi-coding-agent-snap/issues/26 and
+    LP: #1849753).
+
+    The CLI wrapper (snap/local/claude.wrapper) works around this by arming
+    AppArmor's onexec transition before exec'ing claude, so claude itself and
+    everything it spawns run unconfined.
+
+    Unlike opencode, Claude Code's compiled binary does not honor
+    BUN_BE_BUN=1 (verified: the string is absent from the binary entirely —
+    Anthropic's build strips Bun's standalone-executable escape hatch, most
+    likely deliberately, as it would otherwise let anyone run arbitrary
+    JavaScript with the embedded Bun runtime instead of Claude Code itself).
+    There is therefore no way to drop into a probe script via the real
+    `claude` binary, and running the actual agent loop needs a live
+    Anthropic API session, which spread tests don't have.
+
+    Instead, this test sources the installed snap/local/claude-onexec.sh —
+    the same file claude.wrapper itself sources, not a copy of it — inside a
+    shell obtained via `snap run --shell`, which snap-confine places under
+    the identical per-snap AppArmor label the wrapper itself would run
+    under. Sourcing the shared file here is safe (unlike sourcing
+    claude.wrapper as a whole, which ends in `exec "$BIN"`, the real claude
+    binary): claude-onexec.sh only sets the onexec attribute on the current
+    task and never execs anything itself.
+
+    Only systems with AppArmor are relevant, so Fedora is excluded.
+
+systems:
+    - ubuntu-*
+    - debian-*
+
+prepare: |
+    snap install hello-world
+
+execute: |
+    # probe.sh mirrors claude.wrapper's structure: arm onexec, then
+    # immediately exec with nothing in between. Onexec only takes effect at
+    # the arming task's *own next* exec() — it doesn't retroactively
+    # unconfine a still-running task. The inner `exec sh -c '...'` performs
+    # that transition; everything after it runs from within the
+    # already-unconfined shell, same as claude itself does after
+    # claude.wrapper's final `exec "$BIN"`.
+    cat > probe.sh <<'PROBE'
+    #!/bin/sh
+    set -e
+
+    . /snap/claude-code/current/bin/claude-onexec.sh
+
+    exec sh -c '
+    echo "self: $(cat /proc/$$/attr/apparmor/current)"
+    echo "child: $(sh -c "cat /proc/self/attr/apparmor/current")"
+    snap run hello-world > redirect.txt
+    echo "redirect: rc=$?"
+    '
+    PROBE
+    chmod +x probe.sh
+
+    # Captured via command substitution, not `> file` redirection: a file
+    # opened by this unconfined host shell, then inherited across
+    # snap-confine's launch of the complain-mode claude-code process,
+    # breaks writes through it from the other side (same class of bug as
+    # tests/smoke/claude-code/task.yaml's doctor check).
+    PROBE_OUTPUT=$(snap run --shell claude-code -c "$PWD/probe.sh")
+    echo "$PROBE_OUTPUT"
+    echo "$PROBE_OUTPUT" | MATCH '^self: unconfined$'
+    echo "$PROBE_OUTPUT" | MATCH '^child: unconfined$'
+    echo "$PROBE_OUTPUT" | MATCH '^redirect: rc=0$'
+    MATCH 'Hello World!' < redirect.txt
+
+restore: |
+    rm -f probe.sh probe.txt redirect.txt

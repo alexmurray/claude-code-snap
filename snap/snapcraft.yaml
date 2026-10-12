@@ -1,0 +1,164 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Alex Murray
+name: claude-code
+base: core26
+version: "2.1.295"
+title: Claude Code
+summary: Agentic coding tool that lives in your terminal
+description: |
+  Claude Code is Anthropic's agentic coding tool. It lives in your terminal,
+  understands your codebase, and helps you code faster through natural
+  language commands — delegating engineering tasks directly from the
+  terminal, keeping developers in control of the entire process.
+
+  Claude Code requires an Anthropic account (a Claude subscription, or API
+  billing) to use. Use is subject to Anthropic's terms; see
+  https://code.claude.com/docs/en/overview.
+
+  This snap bundles Anthropic's official prebuilt `claude` binary, fetched
+  directly from anthropics/claude-code's GitHub release assets. Claude
+  Code's implementation is closed source, so unlike a typical snap this
+  package cannot build it from source: it fetches the published release
+  binary directly and wraps it for classic confinement.
+
+  The snap packaging is maintained separately at
+  https://github.com/alexmurray/claude-snap
+contact: https://github.com/alexmurray/claude-snap/issues
+website: https://code.claude.com/docs/en/overview
+source-code: https://github.com/anthropics/claude-code
+issues: https://github.com/alexmurray/claude-snap/issues
+assumes: [snapd2.76]
+
+grade: stable
+confinement: classic
+
+platforms:
+  amd64:
+    build-on: [amd64]
+    build-for: [amd64]
+  arm64:
+    build-on: [arm64]
+    build-for: [arm64]
+
+apps:
+  claude-code:
+    command: bin/claude.wrapper
+    completer: usr/share/bash-completion/completions/claude-code.completion
+    environment:
+      DISABLE_AUTOUPDATER: "1"
+  claude:
+    command: bin/claude.wrapper
+    completer: usr/share/bash-completion/completions/claude.completion
+    environment:
+      DISABLE_AUTOUPDATER: "1"
+
+parts:
+  # ============================================================
+  # claude-code-binary — fetch Anthropic's prebuilt per-arch native
+  # binary from anthropics/claude-code's GitHub release assets
+  # (claude-linux-<arch>.tar.gz). Claude Code is closed source: the
+  # published release binary *is* the upstream artifact, nothing to
+  # build. That repo holds no source, but does publish real tagged
+  # releases with these binaries attached, plus a PGP-signed
+  # SHASUMS256.txt — see AGENTS.md for why GitHub was chosen over
+  # npm/downloads.claude.ai (both also work; this one has no regional
+  # restriction and the strongest provenance).
+  #
+  # The version lives only in the top-level `version:` field; both
+  # source URLs below interpolate it via $CRAFT_PROJECT_VERSION, so
+  # Renovate only has to touch one field. No `adopt-info:`/
+  # `craftctl set version=`: nothing here is derived at build time.
+  # ============================================================
+  claude-code-binary:
+    plugin: dump
+    source:
+      - on amd64 to amd64: https://github.com/anthropics/claude-code/releases/download/v$CRAFT_PROJECT_VERSION/claude-linux-x64.tar.gz
+      - on arm64 to arm64: https://github.com/anthropics/claude-code/releases/download/v$CRAFT_PROJECT_VERSION/claude-linux-arm64.tar.gz
+    organize:
+      claude: bin/claude
+    override-build: |
+      set -ex
+      craftctl default
+
+      # Verify sha256 against a pinned known-good value, taken from the
+      # release's own PGP-signed SHASUMS256.txt (signature not verified
+      # at build time — see AGENTS.md). `source-checksum` can't do this:
+      # craft-parts rejects its per-architecture "on <arch> to <arch>"
+      # grammar, and each arch needs a different checksum — see AGENTS.md
+      # for why splitting into two parts doesn't avoid this either.
+      #
+      # Recompute after bumping the version:
+      #   curl -fsSL https://github.com/anthropics/claude-code/releases/download/<version>/SHASUMS256.txt
+      #   curl -fsSL <url> | tar -xzO claude | sha256sum
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64)
+          EXPECTED_SHA256=4503bfe11a6c7fcc1e0b39b5e0d347c04248f750b03b0977b3ad6b531fe6f358
+          ;;
+        arm64)
+          EXPECTED_SHA256=cfb9dc1332fb6f92a683f835823e91b3179a803398ca7852cd2381a3cb1dea3b
+          ;;
+      esac
+      ACTUAL_SHA256=$(sha256sum "${CRAFT_PART_INSTALL}/claude" | cut -d' ' -f1)
+      if [ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]; then
+        echo "ERROR: claude binary checksum mismatch for $CRAFT_ARCH_BUILD_FOR" >&2
+        echo "  expected: $EXPECTED_SHA256" >&2
+        echo "  actual:   $ACTUAL_SHA256" >&2
+        exit 1
+      fi
+
+      # The release tarball stores the executable bit on `claude` itself,
+      # but reassert it as defense in depth against a registry/tar edge
+      # case silently dropping it (the installed snap would otherwise fail
+      # with a confusing "Permission denied").
+      chmod 755 "${CRAFT_PART_INSTALL}/claude"
+
+  # ============================================================
+  # wl-clipboard — Wayland clipboard tools from Ubuntu package.
+  # Needed for clipboard support on Wayland (default display server).
+  # Claude Code shells out to wl-copy/wl-paste on Wayland, falling back
+  # to xclip/xsel on X11 (left to the host, not bundled here).
+  # ============================================================
+  wl-clipboard:
+    after:
+      - claude-code-binary
+    plugin: nil
+    stage-packages:
+      - wl-clipboard
+    stage:
+      - usr/bin/wl-copy
+      - usr/bin/wl-paste
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libwayland-client.so.0
+      - usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/libwayland-client.so.0.*
+    # Classic confinement skips snapcraft's automatic ELF interpreter/rpath
+    # patching by default (it assumes a classic snap's binaries should run
+    # against the host's own libraries, unpatched). wl-copy/wl-paste are the
+    # exception: they need to resolve against the base snap's libwayland,
+    # not the host's. enable-patchelf re-enables that automatic patching for
+    # just this part's primed ELF files (prime step only — it relies on the
+    # tracked file list, so it can't be combined with override-prime). It
+    # inspects each binary's real DT_NEEDED dependencies and computes the
+    # correct interpreter/rpath itself (bundled libs get an $ORIGIN-relative
+    # rpath, base-snap libs get their real /snap/core26/current/... path),
+    # rather than this part hardcoding a guess per architecture by hand.
+    build-attributes:
+      - enable-patchelf
+
+  # ============================================================
+  # Configuration — wrapper script, bash completion
+  # ============================================================
+  claude-code-configuration:
+    after:
+      - claude-code-binary
+    plugin: nil
+    source: snap/local
+    override-build: |
+      install -Dm755 "$CRAFT_PART_SRC"/claude.wrapper \
+        "$CRAFT_PART_INSTALL"/bin/claude.wrapper
+      install -Dm644 "$CRAFT_PART_SRC"/claude-onexec.sh \
+        "$CRAFT_PART_INSTALL"/bin/claude-onexec.sh
+      install -Dm644 "$CRAFT_PART_SRC"/claude.completion \
+        "$CRAFT_PART_INSTALL"/usr/share/bash-completion/completions/claude-code.completion
+      install -Dm644 "$CRAFT_PART_SRC"/claude.completion \
+        "$CRAFT_PART_INSTALL"/usr/share/bash-completion/completions/claude.completion
+      install -Dm644 "$CRAFT_PART_SRC"/claude-LICENSE.md \
+        "$CRAFT_PART_INSTALL"/usr/share/doc/claude-code/LICENSE.md

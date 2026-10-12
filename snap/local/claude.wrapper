@@ -1,0 +1,33 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Canonical Ltd.
+# SPDX-FileCopyrightText: Alex Murray
+# SPDX-License-Identifier: Apache-2.0
+#
+# Wrapper script for claude that unsets SNAP environment variables and execs
+# the bundled native binary. Claude Code's built-in tools (Bash, Read, Write,
+# Edit, ...) should operate in the user's environment, not the snap sandbox
+# environment.
+#
+# Based on the same pattern used by pi-coding-agent-snap and opencode-snap.
+
+BIN="$SNAP/bin/claude"
+
+# Prepend the snap's bundled clipboard tools (wl-copy / wl-paste) to PATH so
+# clipboard operations work on Wayland even when the host has neither
+# installed. Exported before the SNAP_* unset loop below, while $SNAP is
+# still set.
+PATH="$SNAP/usr/bin:$PATH"
+export PATH
+
+# Arms AppArmor's onexec transition so claude, and everything it spawns,
+# runs unconfined. See claude-onexec.sh for why (LP: #1849753), and
+# tests/smoke/apparmor-onexec/task.yaml, which sources this same installed
+# file rather than its own copy.
+. "$SNAP/bin/claude-onexec.sh"
+
+# Unset all environment variables starting with SNAP
+for var in $(env | cut -d= -f1 | grep '^SNAP'); do
+    unset "$var"
+done
+
+exec "$BIN" "$@"

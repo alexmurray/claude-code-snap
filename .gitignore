@@ -1,0 +1,19 @@
+*.snap
+__pycache__/
+
+# Local image-garden / spread artifacts (VM images and logs left behind by
+# running spread tests locally, e.g. `image-garden.spread`)
+.image-garden/
+*.qcow2
+*.qcow2.log
+efi-code.*.img
+efi-vars.*.img
+*.seed.iso
+*.lock
+*.meta-data
+*.user-data
+*.run
+*.serial.log
+*.stdout.log
+*.stderr.log
+*.spread-reuse.*.yaml

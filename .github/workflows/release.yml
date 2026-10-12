@@ -1,0 +1,341 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Canonical Ltd.
+# SPDX-FileCopyrightText: Alex Murray
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag to create (for example v2.1.296)
+        required: true
+        type: string
+      target:
+        description: Branch to tag from
+        required: false
+        default: main
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: create release notes
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Resolve release context
+        id: context
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const isDispatch = context.eventName === "workflow_dispatch";
+            const version = isDispatch ? context.payload.inputs?.version : context.ref.replace("refs/tags/", "");
+            const target = isDispatch ? (context.payload.inputs?.target || "main") : context.payload.repository.default_branch;
+
+            if (!version || !/^v\d+\.\d+\.\d+(?:[-+].*)?$/.test(version)) {
+              core.setFailed(`Invalid tag '${version}'. Use format v<major>.<minor>.<patch>.`);
+              return;
+            }
+
+            core.setOutput("tag", version);
+            core.setOutput("target", target);
+
+      # Unlike pi-coding-agent-snap / opencode-snap, Claude Code is closed
+      # source: there is no upstream git repo to build from, so there's
+      # nothing to `source-tag:` pin. The snap instead pins an exact
+      # anthropics/claude-code GitHub release asset directly in the download
+      # URLs in snap/snapcraft.yaml (that repo holds no source, but does
+      # publish real tagged releases with binary assets attached). Validate
+      # against that, and against anthropics/claude-code's own latest
+      # GitHub release.
+      - name: Validate release tag against packaged and upstream versions
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ steps.context.outputs.tag }}
+          TARGET_REF: ${{ github.event_name == 'workflow_dispatch' && steps.context.outputs.target || steps.context.outputs.tag }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const releaseTag = process.env.RELEASE_TAG;
+            const targetRef = process.env.TARGET_REF;
+
+            function parseSemver(tag) {
+              const m = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(tag || "");
+              if (!m) return null;
+              return {
+                major: Number(m[1]),
+                minor: Number(m[2]),
+                patch: Number(m[3]),
+              };
+            }
+
+            function compareSemver(a, b) {
+              if (a.major !== b.major) return a.major - b.major;
+              if (a.minor !== b.minor) return a.minor - b.minor;
+              return a.patch - b.patch;
+            }
+
+            const content = await github.rest.repos.getContent({
+              owner,
+              repo,
+              path: "snap/snapcraft.yaml",
+              ref: targetRef,
+            });
+
+            if (!("content" in content.data)) {
+              core.setFailed("Could not read snap/snapcraft.yaml from target ref.");
+              return;
+            }
+
+            const snapcraft = Buffer.from(content.data.content, "base64").toString("utf8");
+            // Both GitHub release asset URLs interpolate $CRAFT_PROJECT_VERSION
+            // rather than embedding the version themselves (see
+            // snap/snapcraft.yaml's comments), so there's exactly one place
+            // to read it from: the top-level version: field.
+            const versionMatch = /\nversion: "([0-9]+\.[0-9]+\.[0-9]+)"/.exec(snapcraft);
+            if (!versionMatch) {
+              core.setFailed("Could not find a top-level version: \"X.Y.Z\" field in snap/snapcraft.yaml.");
+              return;
+            }
+
+            const packagedTag = `v${versionMatch[1]}`;
+
+            const upstreamLatest = await github.rest.repos.getLatestRelease({
+              owner: "anthropics",
+              repo: "claude-code",
+            });
+            const upstreamLatestTag = upstreamLatest.data.tag_name;
+
+            const releaseParsed = parseSemver(releaseTag);
+            const packagedParsed = parseSemver(packagedTag);
+            const upstreamParsed = parseSemver(upstreamLatestTag);
+
+            if (!releaseParsed || !packagedParsed || !upstreamParsed) {
+              core.setFailed(`Could not parse one of the versions as semver: release=${releaseTag}, packaged=${packagedTag}, upstream latest=${upstreamLatestTag}.`);
+              return;
+            }
+
+            if (releaseTag !== packagedTag) {
+              core.setFailed(`Release tag ${releaseTag} must exactly match the Claude Code version pinned in snap/snapcraft.yaml (${packagedTag}).`);
+              return;
+            }
+
+            if (compareSemver(releaseParsed, upstreamParsed) > 0) {
+              core.setFailed(`Release tag ${releaseTag} must not be newer than anthropics/claude-code's latest GitHub release (${upstreamLatestTag}).`);
+              return;
+            }
+
+            core.info(`Validated release tag ${releaseTag} against packaged version ${packagedTag} and upstream latest ${upstreamLatestTag}.`);
+
+      - name: Create tag from target branch
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ steps.context.outputs.tag }}
+          TARGET_BRANCH: ${{ steps.context.outputs.target }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const tag = process.env.RELEASE_TAG;
+            const targetBranch = process.env.TARGET_BRANCH;
+
+            const branch = await github.rest.repos.getBranch({
+              owner,
+              repo,
+              branch: targetBranch,
+            });
+            const sha = branch.data.commit.sha;
+
+            try {
+              await github.rest.git.createRef({
+                owner,
+                repo,
+                ref: `refs/tags/${tag}`,
+                sha,
+              });
+              core.info(`Created tag ${tag} at ${targetBranch} (${sha}).`);
+            } catch (error) {
+              if (error.status === 422) {
+                core.info(`Tag ${tag} already exists, skipping tag creation.`);
+              } else {
+                throw error;
+              }
+            }
+
+      - name: Build release notes and create or update release
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: ${{ steps.context.outputs.tag }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const currentTag = process.env.RELEASE_TAG;
+
+            function parseSemver(tag) {
+              const m = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(tag);
+              if (!m) return null;
+              return {
+                major: Number(m[1]),
+                minor: Number(m[2]),
+                patch: Number(m[3]),
+              };
+            }
+
+            function compareSemver(a, b) {
+              if (a.major !== b.major) return a.major - b.major;
+              if (a.minor !== b.minor) return a.minor - b.minor;
+              return a.patch - b.patch;
+            }
+
+            function extractNotes(prBody) {
+              if (!prBody) return null;
+
+              const headingMatch = /(?:^|\n)#{2,6}\s*(?:Release Notes?|Changelog)\s*\n/i.exec(prBody);
+              if (!headingMatch || headingMatch.index === undefined) return null;
+
+              const start = headingMatch.index + headingMatch[0].length;
+              const rest = prBody.slice(start);
+
+              const delimiterIndex = rest.search(/\n---\n/);
+              const section = delimiterIndex >= 0 ? rest.slice(0, delimiterIndex) : rest;
+
+              const cleaned = section
+                .replace(/<details>/gi, "")
+                .replace(/<\/details>/gi, "")
+                .replace(/<summary>([\s\S]*?)<\/summary>/gi, (_m, title) => `#### ${String(title).trim()}`)
+                .replace(/\n{3,}/g, "\n\n")
+                .trim();
+
+              return cleaned.length > 0 ? cleaned : null;
+            }
+
+            async function listAllTags() {
+              return github.paginate(github.rest.repos.listTags, {
+                owner,
+                repo,
+                per_page: 100,
+              });
+            }
+
+            const tags = await listAllTags();
+            const semverTags = tags
+              .map((t) => ({ name: t.name, parsed: parseSemver(t.name) }))
+              .filter((t) => t.parsed !== null)
+              .sort((a, b) => compareSemver(a.parsed, b.parsed));
+
+            const currentParsed = parseSemver(currentTag);
+            const previous = currentParsed
+              ? semverTags
+                .filter((t) => t.name !== currentTag)
+                .filter((t) => compareSemver(t.parsed, currentParsed) < 0)
+                .at(-1)
+              : semverTags.filter((t) => t.name !== currentTag).at(-1);
+            const previousTag = previous ? previous.name : null;
+
+            core.info(previousTag
+              ? `Using previous tag ${previousTag}`
+              : "No previous semver tag found; release notes will include only a fallback message.");
+
+            const prMap = new Map();
+
+            if (previousTag) {
+              const comparison = await github.rest.repos.compareCommitsWithBasehead({
+                owner,
+                repo,
+                basehead: `${previousTag}...${currentTag}`,
+              });
+
+              for (const commit of comparison.data.commits) {
+                const pulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                  owner,
+                  repo,
+                  commit_sha: commit.sha,
+                  per_page: 100,
+                });
+
+                for (const pr of pulls.data) {
+                  if (!pr.merged_at) continue;
+                  if (pr.user?.login !== "renovate[bot]") continue;
+                  prMap.set(pr.number, pr);
+                }
+              }
+            }
+
+            const renovatePrs = [...prMap.values()].sort((a, b) => {
+              return new Date(a.merged_at).getTime() - new Date(b.merged_at).getTime();
+            });
+
+            const lines = [];
+            lines.push("## Renovate updates");
+            lines.push("");
+
+            if (renovatePrs.length === 0) {
+              lines.push("No Renovate pull requests were detected for this release range.");
+              lines.push("");
+            }
+
+            for (const pr of renovatePrs) {
+              lines.push(`### #${pr.number} ${pr.title}`);
+              lines.push(`- PR: ${pr.html_url}`);
+
+              const extracted = extractNotes(pr.body || "");
+              if (extracted) {
+                lines.push("");
+                lines.push(extracted);
+              } else {
+                lines.push("- No changelog section found in PR body.");
+              }
+
+              lines.push("");
+            }
+
+            const body = lines.join("\n").trim();
+
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner,
+                repo,
+                tag: currentTag,
+              });
+
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: existing.data.id,
+                tag_name: currentTag,
+                name: currentTag,
+                body,
+                draft: false,
+                prerelease: false,
+              });
+
+              core.info(`Updated release for ${currentTag}.`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+
+              await github.rest.repos.createRelease({
+                owner,
+                repo,
+                tag_name: currentTag,
+                name: currentTag,
+                body,
+                draft: false,
+                prerelease: false,
+              });
+
+              core.info(`Created release for ${currentTag}.`);
+            }
