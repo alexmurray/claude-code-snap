@@ -23,7 +23,7 @@ permissions:
 jobs:
   update-checksums:
     name: update checksums
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # GITHUB_TOKEN can only push to branches in this repository, not to a
     # fork — and GitHub already strips write permissions from the token on
     # pull_request-triggered runs for fork PRs, so this would fail anyway.
