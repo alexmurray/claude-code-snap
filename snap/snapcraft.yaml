@@ -154,7 +154,7 @@ parts:
   # ============================================================
   claude-desktop:
     plugin: nil
-    source: https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_2.31226.1_$CRAFT_ARCH_BUILD_FOR.deb
+    source: https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_2.37337.1_$CRAFT_ARCH_BUILD_FOR.deb
     source-type: file
     organize:
       claude-desktop/: (component/desktop)/
@@ -170,10 +170,10 @@ parts:
       # AGENTS.md. scripts/update-checksums.py recomputes these.
       case "$CRAFT_ARCH_BUILD_FOR" in
         amd64)
-          EXPECTED_DEB_SHA256=5a9bebdfcb1df6ce38767b373f3a7fabf77156a2ddd8a3f5d04961da5bde305e
+          EXPECTED_DEB_SHA256=41745b0914f0ff51631a1ff1bb403b836bf5c995845cca6742dd39bca3a2da14
           ;;
         arm64)
-          EXPECTED_DEB_SHA256=d2f57a38ffc73cfda660f8772a5f8bada05e6d74399948a268c6f5d53593ee8f
+          EXPECTED_DEB_SHA256=ad6f1da2a114215d2a73c53c1a99681f9c0bbe148b92f906d635b2efed835cdc
           ;;
       esac
       ACTUAL_DEB_SHA256=$(sha256sum "$DEB" | cut -d' ' -f1)
