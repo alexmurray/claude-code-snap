@@ -170,10 +170,10 @@ parts:
       # AGENTS.md. scripts/update-checksums.py recomputes these.
       case "$CRAFT_ARCH_BUILD_FOR" in
         amd64)
-          EXPECTED_DEB_SHA256=5a9bebdfcb1df6ce38767b373f3a7fabf77156a2ddd8a3f5d04961da5bde305e
+          EXPECTED_DEB_SHA256=4fcf658e0fc895390ab82593287281dfbce261b0ec3ea90060e82d8bfbfd7a84
           ;;
         arm64)
-          EXPECTED_DEB_SHA256=d2f57a38ffc73cfda660f8772a5f8bada05e6d74399948a268c6f5d53593ee8f
+          EXPECTED_DEB_SHA256=7022dc56de30e0beb7fa0a7dc84e09aa00d7f9d4e1b7f93043b32baf75a2f6d8
           ;;
       esac
       ACTUAL_DEB_SHA256=$(sha256sum "$DEB" | cut -d' ' -f1)
