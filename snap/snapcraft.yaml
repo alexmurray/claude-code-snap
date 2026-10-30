@@ -154,7 +154,7 @@ parts:
   # ============================================================
   claude-desktop:
     plugin: nil
-    source: https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_2.31226.1_$CRAFT_ARCH_BUILD_FOR.deb
+    source: https://downloads.claude.ai/claude-desktop/apt/stable/pool/main/c/claude-desktop/claude-desktop_4.4212.0_$CRAFT_ARCH_BUILD_FOR.deb
     source-type: file
     organize:
       claude-desktop/: (component/desktop)/
